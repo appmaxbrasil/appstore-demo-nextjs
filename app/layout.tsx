@@ -20,7 +20,7 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: "Teste Apple Pay — Appmax",
+  title: "Checkout de teste — Appmax",
   description: "Projeto de teste do fluxo de pagamento via Apple Pay com a Appmax.",
 };
 

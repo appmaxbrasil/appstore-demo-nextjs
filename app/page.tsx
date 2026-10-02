@@ -4,12 +4,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { TEST_PRODUCT, formatBRL } from "@/lib/checkout/product";
 import { TEST_CARD, TEST_CUSTOMER } from "@/lib/checkout/testData";
-import type { AppleToken, AppmaxCheckoutData, AppmaxError } from "@/lib/appmax/scripts";
+import type {
+  AppleToken,
+  AppmaxCheckoutData,
+  AppmaxError,
+  GooglePaymentMethodData,
+} from "@/lib/appmax/scripts";
 import { useAppmaxScripts } from "./components/useAppmaxScripts";
 import AppmaxIpForm from "./components/AppmaxIpForm";
 import CustomerForm, { type CustomerData } from "./components/CustomerForm";
 import CreditCardForm from "./components/CreditCardForm";
 import ApplePayButton from "./components/ApplePayButton";
+import GooglePayButton from "./components/GooglePayButton";
+import PaymentProcessingOverlay from "./components/PaymentProcessingOverlay";
 import ExternalIdOverride, { useExternalIdOverride } from "./components/ExternalIdOverride";
 
 /**
@@ -23,6 +30,8 @@ import ExternalIdOverride, { useExternalIdOverride } from "./components/External
  *   AppmaxIpForm.tsx           gatilho da coleta de IP
  *   CreditCardForm.tsx         form que o SDK tokeniza
  *   ApplePayButton.tsx         container do botão gerenciado pelo SDK
+ *   GooglePayButton.tsx        placeholder do iframe do Google Pay
+ *   PaymentProcessingOverlay   loading depois que a folha do Google fecha
  *   este arquivo               estado, chamadas ao backend, composição
  */
 
@@ -60,6 +69,15 @@ export default function CheckoutPage() {
    * Ver FLUXO-CARTAO.md §3.
    */
   const cardPaymentLockRef = useRef<number | null>(null);
+
+  /** Mesma trava do cartão, para o Google Pay (o iframe pode reautorizar). */
+  const googlePaymentLockRef = useRef<number | null>(null);
+
+  /**
+   * A folha do Google já fechou quando o `onAuthorize` roda; sem este loading
+   * o comprador fica olhando a página parada até a Appmax responder.
+   */
+  const [googlePayProcessing, setGooglePayProcessing] = useState(false);
 
   const effectiveExternalId = externalIdOverride.trim() || config?.externalId || null;
   const missingExternalId = Boolean(config) && !effectiveExternalId;
@@ -174,6 +192,65 @@ export default function CheckoutPage() {
   }, []);
 
   /**
+   * Google Pay autorizado. O SDK não espera este callback (ver regra 6 em
+   * useAppmaxScripts.ts), então o resultado só aparece na nossa UI.
+   */
+  const onGooglePayAuthorize = useCallback(
+    async (paymentMethodData: GooglePaymentMethodData) => {
+      const { orderId, customerId, installments, form } = latest.current;
+      if (!orderId || !customerId) {
+        setMessage("Finalize os dados do pedido antes de pagar.");
+        return;
+      }
+      if (googlePaymentLockRef.current === orderId) {
+        console.warn(
+          `[Appmax] segunda autorização do Google Pay para o pedido ${orderId} — ignorando.`
+        );
+        return;
+      }
+      googlePaymentLockRef.current = orderId;
+      console.log("[Appmax] google-pay: PaymentMethodData recebido", {
+        type: paymentMethodData.type,
+        description: paymentMethodData.description,
+        info: paymentMethodData.info,
+        tokenizationType: paymentMethodData.tokenizationData.type,
+      });
+      setStep("processing");
+      setMessage(null);
+      setGooglePayProcessing(true);
+      try {
+        const res = await fetch("/api/checkout/google-pay", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            orderId,
+            customerId,
+            installments,
+            holderDocumentNumber: form.documentNumber,
+            paymentMethodData,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? `Falha no pagamento (HTTP ${res.status})`);
+        setStep("success");
+        setMessage("Pagamento aprovado! ✅");
+      } catch (error) {
+        console.error("[Appmax] google-pay: falha ao efetivar o pagamento", error);
+        googlePaymentLockRef.current = null;
+        setStep("error");
+        setMessage(
+          `Google Pay autorizado, mas a Appmax recusou: ${
+            error instanceof Error ? error.message : "erro desconhecido"
+          }`
+        );
+      } finally {
+        setGooglePayProcessing(false);
+      }
+    },
+    []
+  );
+
+  /**
    * A trava é posta de forma SÍNCRONA, antes de qualquer await: um segundo
    * token pode chegar logo atrás do primeiro e precisa encontrar o lock já
    * posto. É por isso que é um `useRef`, e não `useState`.
@@ -235,6 +312,7 @@ export default function CheckoutPage() {
     onError: onAppmaxError,
     getCheckoutData,
     onAuthorize,
+    onGooglePayAuthorize,
   });
 
   function updateField<K extends keyof CustomerData>(key: K, value: string) {
@@ -292,6 +370,7 @@ export default function CheckoutPage() {
     setCustomerId(null);
     setMessage(null);
     cardPaymentLockRef.current = null;
+    googlePaymentLockRef.current = null;
     setStep("form");
   }
 
@@ -303,7 +382,7 @@ export default function CheckoutPage() {
       <header className="flex flex-col gap-2">
         <h1 className="text-2xl font-semibold">Checkout de teste — Appmax JS</h1>
         <p className="text-sm text-am-ink-muted">
-          Demo de tokenização de cartão e Apple Pay com o Appmax JS
+          Demo de tokenização de cartão, Apple Pay e Google Pay com o Appmax JS
           ({config?.environment ?? "…"}).
         </p>
       </header>
@@ -370,11 +449,13 @@ export default function CheckoutPage() {
       {step === "ready" && (
         <p className="text-sm text-am-ink-muted">
           Pedido #{orderId} criado. Pague com cartão abaixo, ou toque no botão do
-          Apple Pay.
+          Apple Pay / Google Pay.
         </p>
       )}
 
       <ApplePayButton visible={paymentsVisible} />
+
+      <GooglePayButton visible={paymentsVisible} />
 
       <CreditCardForm
         visible={paymentsVisible}
@@ -384,6 +465,11 @@ export default function CheckoutPage() {
       />
 
       {step === "processing" && <p className="text-sm">Processando pagamento…</p>}
+
+      <PaymentProcessingOverlay
+        visible={googlePayProcessing}
+        label="Confirmando pagamento com Google Pay…"
+      />
 
       {step === "success" && <p className="text-sm text-am-success-text">{message}</p>}
 

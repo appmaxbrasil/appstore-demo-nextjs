@@ -51,6 +51,33 @@ export type AppleToken = {
 };
 
 /**
+ * `PaymentMethodData` do Google Pay — o que o iframe da Appmax devolve quando
+ * o comprador autoriza na folha do Google. Chega no MESMO `onAuthorize` do
+ * Apple Pay; `isGooglePaymentData` abaixo discrimina os dois.
+ *
+ * `tokenizationData.token` é uma string JSON cifrada para o gateway que o
+ * iframe configura (`PAYMENT_GATEWAY`). Repasse como veio.
+ * Ver https://developers.google.com/pay/api/web/reference/response-objects#PaymentMethodData
+ */
+export type GooglePaymentMethodData = {
+  type: string;
+  description?: string;
+  info?: {
+    cardNetwork?: string;
+    cardDetails?: string;
+    assuranceDetails?: { accountVerified?: boolean; cardHolderAuthenticated?: boolean };
+  };
+  tokenizationData: { type: string; token: string };
+};
+
+/** Payload do `onAuthorize`: Apple Pay ou Google Pay, dependendo do botão. */
+export type AuthorizePayload = AppleToken | GooglePaymentMethodData;
+
+export function isGooglePaymentData(data: unknown): data is GooglePaymentMethodData {
+  return Boolean(data && typeof data === "object" && "tokenizationData" in data);
+}
+
+/**
  * O que o `onSuccess` recebe. É POLIMÓRFICO:
  *
  *   coleta de IP  → objeto `{ ip }`
@@ -122,7 +149,7 @@ export type AppmaxInitOptions = {
   onIp?: (data: { ip: string }) => void;
   onError?: (err: AppmaxError | unknown) => void;
   onUpdate?: () => AppmaxCheckoutData;
-  onAuthorize?: (appleToken: AppleToken) => void | Promise<void>;
+  onAuthorize?: (payload: AuthorizePayload) => void | Promise<void>;
 };
 
 /**
@@ -136,7 +163,7 @@ export type AppmaxScripts = {
       onError: (err: unknown) => void,
       externalId?: string,
       onUpdate?: () => AppmaxCheckoutData,
-      onAuthorize?: (appleToken: AppleToken) => void | Promise<void>
+      onAuthorize?: (payload: AuthorizePayload) => void | Promise<void>
     ) => void);
 };
 
@@ -160,6 +187,15 @@ export const APPMAX_SELECTORS = {
   checkoutForm: "data-appmax-checkout",
   /** Container onde o SDK injeta o botão nativo do Apple Pay. */
   applePayButton: "appmax-apple-pay-btn",
+  /**
+   * Placeholder do Google Pay: o SDK insere o iframe da Appmax ANTES dele (com
+   * a altura dele, mínimo 48px) e esconde o placeholder.
+   */
+  googlePayButton: "data-appmax-google-pay",
+  /** Escondido pelo SDK quando o Google Pay não está disponível. */
+  googlePayWrapper: "data-appmax-google-pay-wrapper",
+  /** No form `data-appmax-checkout`: nome da loja na folha do Google Pay. */
+  merchantName: "data-appmax-merchant-name",
 } as const;
 
 /**

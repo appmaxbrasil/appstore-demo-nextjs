@@ -1,8 +1,9 @@
 # Appmax App Store — demo de checkout em Next.js
 
 Demo de referência de como integrar o **Appmax JS** (`appmax.min.js`) num
-projeto **Next.js / server-side**, cobrindo os dois meios de pagamento que
-dependem de tokenização no browser: **Apple Pay** e **cartão de crédito**.
+projeto **Next.js / server-side**, cobrindo os meios de pagamento que
+dependem de tokenização no browser: **Apple Pay**, **Google Pay** e **cartão
+de crédito**.
 
 Feito especificamente para quem vai integrar num app com **App Router do
 Next.js** (Server Components, Route Handlers, runtime Node). A documentação
@@ -30,6 +31,10 @@ repositório é o código que acompanha os guias, não um substituto deles.
 - Checkout de teste (produto fixo, R$ 5,00) com **Apple Pay** — fluxo
   GERENCIADO pelo `appmax.min.js` (ele monta o botão, valida o merchant e
   abre a `PaymentSheet` sozinho).
+- **Google Pay** no mesmo `init()` — o SDK monta o botão num iframe da Appmax
+  e escolhe sozinho qual carteira mostrar (Apple Pay onde ele existe, Google
+  Pay no resto). Sem domínio a cadastrar. Ver
+  [`FLUXO-GOOGLE-PAY.md`](FLUXO-GOOGLE-PAY.md).
 - Checkout com **cartão de crédito tokenizado** (`data-appmax-checkout`),
   enviando o token pro backend, nunca o número do cartão.
 - Domínio do Apple Pay servido em
@@ -114,6 +119,8 @@ pnpm dev
 | Health check devolve 500 | Filesystem somente-leitura (serverless): sem banco não há onde persistir o `external_id` — ver `lib/appmax/state.ts` |
 | Checkout mostra "external_id não configurado" | A linha do ambiente ativo em `/configuracao` está sem `external_id`. Rode a instalação em `/setup` (o health check preenche) — env var não cobre mais isso |
 | Botão do Apple Pay não aparece | Não é Safari, sem cartão na Wallet, ou o container `.appmax-apple-pay-btn` não existia no DOM quando o `init()` rodou — ver [`FLUXO-APPLE-PAY.md`](FLUXO-APPLE-PAY.md) §2 |
+| Botão do Google Pay não aparece | Apple Pay disponível no aparelho (tem precedência), navegador sem conta Google/cartão salvo, ou a âncora `[data-appmax-google-pay]` não existia no DOM quando o `init()` rodou — ver [`FLUXO-GOOGLE-PAY.md`](FLUXO-GOOGLE-PAY.md) |
+| Google Pay: `400 Invalid Google Pay token` | O `paymentMethodData` foi alterado antes de ir pra Appmax (`JSON.parse` no `token`, campo removido). Repasse como chegou |
 | `cart.total.toFixed is not a function` | `onUpdate` devolvendo o formato errado — números **em reais**, não string nem centavos. Ver [`FLUXO-APPLE-PAY.md`](FLUXO-APPLE-PAY.md) §3 |
 | Apple Pay funciona em produção mas não em sandbox | Limitação conhecida — merchant session sempre falha em sandbox (ver "Limitações") |
 | `/configuracao` devolve 500 ao salvar | Banco local não pôde ser aberto (filesystem somente-leitura); use env vars nesse runtime |
@@ -129,10 +136,12 @@ pnpm dev
 | `onError({ code, message, stage, status, details })` | idem | Falhas de qualquer etapa. O `status` é o que diferencia `external_id` errado (`404`) de payload inválido (`422`) |
 | `onSuccess(data)` | idem | Forma posicional (legada, via `APPMAX_SCRIPT_API=legacy`): **polimórfico** — objeto `{ ip }` na coleta de IP, **string crua** no token do cartão. `data.token` é `undefined` |
 | `onUpdate()` | [`app/page.tsx`](app/page.tsx) | Monta o carrinho da `PaymentSheet` do Apple Pay — números **em reais**, não centavos |
-| `onAuthorize(appleToken)` | idem | Recebe o Apple Token; precisa **rejeitar a Promise** em falha, não devolver `false` |
+| `onAuthorize(payload)` | idem | Apple Token **ou** `paymentMethodData` do Google, no mesmo callback (discriminados por `isGooglePaymentData`). No Apple Pay precisa **rejeitar a Promise** em falha; no Google Pay a folha já fechou e o retorno é ignorado — o resultado vai pra nossa UI |
 | `form[data-appmax-customer]` | [`AppmaxIpForm.tsx`](app/components/AppmaxIpForm.tsx) | Gatilho da coleta de IP (só a presença no DOM) e pré-requisito do listener do cartão |
 | `[data-appmax-checkout]` | [`CreditCardForm.tsx`](app/components/CreditCardForm.tsx) | Form de tokenização de cartão |
 | `.appmax-apple-pay-btn` | [`ApplePayButton.tsx`](app/components/ApplePayButton.tsx) | Container sempre montado onde o SDK injeta o botão nativo |
+| `[data-appmax-google-pay]` + `-wrapper` | [`GooglePayButton.tsx`](app/components/GooglePayButton.tsx) | Âncora (com altura) antes da qual o SDK insere o iframe do Google Pay |
+| `data-appmax-merchant-name` | [`CreditCardForm.tsx`](app/components/CreditCardForm.tsx) | Nome da loja na folha do Google, lido do `[data-appmax-checkout]` |
 | Contrato completo | [`lib/appmax/scripts.ts`](lib/appmax/scripts.ts) | Tipos, seletores e nomes de campo — o arquivo a ler primeiro |
 
 👉 Para o passo a passo de como implementar isso **do zero num projeto seu**,
@@ -189,6 +198,7 @@ lib/appmax/
   customers.ts    POST /v1/customers
   orders.ts       POST /v1/orders
   applePay.ts     POST /v1/payments/apple-pay
+  googlePay.ts    POST /v1/payments/google-pay
   creditCard.ts   POST /v1/payments/credit-card
 
 lib/checkout/
@@ -210,6 +220,7 @@ app/api/
   environment/route.ts           GET/POST do ambiente ativo (sandbox/produção)
   checkout/route.ts              cria customer + order
   checkout/apple-pay/route.ts    efetiva o pagamento com o appleToken
+  checkout/google-pay/route.ts   efetiva o pagamento com o paymentMethodData
   checkout/credit-card/route.ts  efetiva o pagamento com o token de cartão
 
 app/.well-known/apple-developer-merchantid-domain-association/route.ts
@@ -224,6 +235,7 @@ app/
     AppmaxIpForm.tsx              gatilho da coleta de IP
     CreditCardForm.tsx            form que o SDK tokeniza
     ApplePayButton.tsx            container do botão gerenciado pelo SDK
+    GooglePayButton.tsx           âncora do iframe do Google Pay
     CustomerForm.tsx              etapa 1 (comprador) — React puro
     ExternalIdOverride.tsx        ferramenta de dev: sobrepõe o external_id
     EnvironmentSwitcher.tsx       seletor sandbox/produção, no Header
@@ -245,6 +257,7 @@ app/
 | GET/POST | `/api/environment` | Lê/troca o ambiente ativo (sandbox/produção) |
 | POST | `/api/checkout` | Cria customer + order |
 | POST | `/api/checkout/apple-pay` | Efetiva pagamento via Apple Pay |
+| POST | `/api/checkout/google-pay` | Efetiva pagamento via Google Pay |
 | POST | `/api/checkout/credit-card` | Efetiva pagamento via cartão tokenizado |
 | GET | `/.well-known/apple-developer-merchantid-domain-association` | Verificação de domínio do Apple Pay |
 
@@ -254,6 +267,9 @@ app/
   domínio/merchant é sempre feita contra a infraestrutura de produção da Apple,
   mesmo em sandbox — não existe merchant session de sandbox. Ver
   [`/api-reference/payments/apple-pay`](https://docs.appmax.com.br/api-reference/payments/apple-pay).
+- **Google Pay funciona em sandbox**: a folha mostra a lista de cartões de
+  teste do Google, em qualquer navegador suportado com uma conta Google
+  logada.
 - **Cartão funciona em sandbox**, ponta a ponta — ver
   [`FLUXO-CARTAO.md`](FLUXO-CARTAO.md).
 - **A trava de pagamento por pedido em `app/page.tsx` é de propósito.** Um
@@ -309,6 +325,7 @@ pnpm lint    # eslint
 - [docs.appmax.com.br](https://docs.appmax.com.br) — documentação oficial
 - [`/guides/appmax-js`](https://docs.appmax.com.br/guides/appmax-js) — AppmaxJS (IP, tokenização, Apple Pay)
 - [`/api-reference/payments/apple-pay`](https://docs.appmax.com.br/api-reference/payments/apple-pay)
+- [`/api-reference/payments/google-pay`](https://docs.appmax.com.br/api-reference/payments/google-pay) e [`/api-reference/payments/google-pay-appmax-js`](https://docs.appmax.com.br/api-reference/payments/google-pay-appmax-js)
 - [`/api-reference/payments/cartao-credito`](https://docs.appmax.com.br/api-reference/payments/cartao-credito)
 - [`/guides/exemplo-checkout-spa`](https://docs.appmax.com.br/guides/exemplo-checkout-spa) — a versão resumida deste projeto, na doc oficial
 - [`/guides/instalacao`](https://docs.appmax.com.br/guides/instalacao) — instalação do app na loja
@@ -317,5 +334,5 @@ pnpm lint    # eslint
 ### Neste repositório
 
 - [`TOKENIZACAO-CARTAO-NEXTJS.md`](TOKENIZACAO-CARTAO-NEXTJS.md) — **guia de implementação** da tokenização de cartão num projeto Next.js
-- [`FLUXO-INSTALACAO.md`](FLUXO-INSTALACAO.md), [`FLUXO-APPLE-PAY.md`](FLUXO-APPLE-PAY.md), [`FLUXO-CARTAO.md`](FLUXO-CARTAO.md) — aprofundamento de cada fluxo, linha a linha
+- [`FLUXO-INSTALACAO.md`](FLUXO-INSTALACAO.md), [`FLUXO-APPLE-PAY.md`](FLUXO-APPLE-PAY.md), [`FLUXO-GOOGLE-PAY.md`](FLUXO-GOOGLE-PAY.md), [`FLUXO-CARTAO.md`](FLUXO-CARTAO.md) — aprofundamento de cada fluxo, linha a linha
 - [`FINGERPRINT-E-IP.md`](FINGERPRINT-E-IP.md) — como obter o fingerprint pelo SDK e qual dos dois gatilhos de coleta de IP usar

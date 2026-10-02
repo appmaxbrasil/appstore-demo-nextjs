@@ -29,6 +29,11 @@ function extractErrorMessage(body: unknown, fallback: string): string {
     const obj = body as Record<string, unknown>;
     if (typeof obj.message === "string") return obj.message;
 
+    // Envelope antigo (ex.: 403 de documento em lista restritiva):
+    // `{ success: false, error, data: { errorCode, message } }`.
+    const data = obj.data as Record<string, unknown> | undefined;
+    if (data && typeof data.message === "string") return data.message;
+
     // Formato OAuth2 (RFC 6749 §5.2): `{ error: "invalid_client",
     // error_description: "..." }`, com `error` como STRING. Sem este caso, um
     // 401 de credencial errada viraria só "Falha ao autenticar (HTTP 401)",
@@ -40,6 +45,20 @@ function extractErrorMessage(body: unknown, fallback: string): string {
 
     const error = obj.error as Record<string, unknown> | undefined;
     if (error && typeof error.message === "string") return error.message;
+
+    // `{ errors: { message } }` — `message` é string, ou, no 422 de validação,
+    // um mapa `{ campo: ["motivo"] }`.
+    const errors = obj.errors as Record<string, unknown> | undefined;
+    if (errors && typeof errors.message === "string") return errors.message;
+    if (errors?.message && typeof errors.message === "object") {
+      return Object.entries(errors.message as Record<string, unknown>)
+        .map(([field, reasons]) =>
+          `${field}: ${Array.isArray(reasons) ? reasons.join(", ") : String(reasons)}`
+        )
+        .join("; ");
+    }
+
+    if (typeof obj.text === "string") return obj.text;
   }
   return fallback;
 }
@@ -95,6 +114,15 @@ export async function appmaxApiRequest<T = unknown>(
     throw new AppmaxApiError(
       extractErrorMessage(body, `Requisição Appmax falhou (HTTP ${res.status})`),
       res.status,
+      body
+    );
+  }
+  // Envelope antigo `{ success: false, ... }` às vezes chega com HTTP 200.
+  // Sem este caso isso passaria como sucesso com `data: []`.
+  if (body && typeof body === "object" && (body as Record<string, unknown>).success === false) {
+    throw new AppmaxApiError(
+      extractErrorMessage(body, "Requisição Appmax falhou (success: false)"),
+      502,
       body
     );
   }

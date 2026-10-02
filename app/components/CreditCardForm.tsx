@@ -52,6 +52,8 @@ export default function CreditCardForm({
   return (
     <form
       data-appmax-checkout
+      // Nome da loja na folha do Google Pay. Sem ele o SDK usa o document.title.
+      data-appmax-merchant-name="Appmax Demo"
       method="POST"
       onSubmit={(e) => {
         e.preventDefault();

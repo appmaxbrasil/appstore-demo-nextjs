@@ -1,8 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { readCardToken, readIp } from "@/lib/appmax/scripts";
-import type { AppleToken, AppmaxCheckoutData } from "@/lib/appmax/scripts";
+import { isGooglePaymentData, readCardToken, readIp } from "@/lib/appmax/scripts";
+import type {
+  AppleToken,
+  AppmaxCheckoutData,
+  AuthorizePayload,
+  GooglePaymentMethodData,
+} from "@/lib/appmax/scripts";
 import type { AppmaxScriptApi } from "@/lib/appmax/config";
 
 type Params = {
@@ -24,6 +29,8 @@ type Params = {
   getCheckoutData: () => AppmaxCheckoutData;
   /** Apple Pay autorizado: precisa LANÇAR se o pagamento falhar. */
   onAuthorize: (appleToken: AppleToken) => Promise<void>;
+  /** Google Pay autorizado (ver ponto 6). */
+  onGooglePayAuthorize: (paymentMethodData: GooglePaymentMethodData) => void;
 };
 
 /**
@@ -58,6 +65,12 @@ type Params = {
  *    crua no `onSuccess`. A discriminação passa por `readCardToken`/`readIp`,
  *    que cobrem as duas, em vez de um `typeof` solto.
  *
+ * 6. **Apple Pay e Google Pay dividem o `onAuthorize`.** O SDK entrega o
+ *    `ApplePayPaymentToken` ou o `PaymentMethodData` do Google no mesmo
+ *    callback, e a discriminação é pelo formato (`isGooglePaymentData`). No
+ *    Google Pay o SDK NÃO espera o retorno: lançar ali não recusa nada, só vira
+ *    unhandled rejection. Então a falha do Google é tratada na nossa UI.
+ *
  * O IP chega pelo `onSuccess` durante o próprio `init()`, sem submit e sem
  * reload, desde que o form `data-appmax-customer` esteja no DOM — ver
  * AppmaxIpForm.
@@ -71,15 +84,28 @@ export function useAppmaxScripts({
   onError,
   getCheckoutData,
   onAuthorize,
+  onGooglePayAuthorize,
 }: Params): { ip: string | null } {
   const [ip, setIp] = useState<string | null>(null);
 
   // Espelho dos callbacks: o init roda uma vez e fecharia sobre versões velhas
   // se lesse as props direto.
-  const callbacks = useRef({ onCardToken, onError, getCheckoutData, onAuthorize });
+  const callbacks = useRef({
+    onCardToken,
+    onError,
+    getCheckoutData,
+    onAuthorize,
+    onGooglePayAuthorize,
+  });
   useEffect(() => {
-    callbacks.current = { onCardToken, onError, getCheckoutData, onAuthorize };
-  }, [onCardToken, onError, getCheckoutData, onAuthorize]);
+    callbacks.current = {
+      onCardToken,
+      onError,
+      getCheckoutData,
+      onAuthorize,
+      onGooglePayAuthorize,
+    };
+  }, [onCardToken, onError, getCheckoutData, onAuthorize, onGooglePayAuthorize]);
 
   /** Com qual `external_id` o `init()` já rodou (ver regra 2). */
   const initializedFor = useRef<string | null>(null);
@@ -98,6 +124,15 @@ export function useAppmaxScripts({
     }
 
     let cancelled = false;
+
+    // Ver regra 6.
+    function authorize(payload: AuthorizePayload): Promise<void> | void {
+      if (isGooglePaymentData(payload)) {
+        callbacks.current.onGooglePayAuthorize(payload);
+        return;
+      }
+      return callbacks.current.onAuthorize(payload);
+    }
 
     function init() {
       if (cancelled || !window.AppmaxScripts || initializedFor.current) return;
@@ -120,7 +155,7 @@ export function useAppmaxScripts({
           onIp: ({ ip }) => setIp(ip),
           onError: (err) => callbacks.current.onError(err),
           onUpdate: () => callbacks.current.getCheckoutData(),
-          onAuthorize: (appleToken) => callbacks.current.onAuthorize(appleToken),
+          onAuthorize: authorize,
         });
         return;
       }
@@ -140,7 +175,7 @@ export function useAppmaxScripts({
         (err) => callbacks.current.onError(err),
         externalId!,
         () => callbacks.current.getCheckoutData(),
-        (appleToken) => callbacks.current.onAuthorize(appleToken)
+        authorize
       );
     }
 
